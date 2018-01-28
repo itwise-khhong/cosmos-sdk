@@ -9,7 +9,7 @@ import (
 type Result struct {
 
 	// Code is the response code, is stored back on the chain.
-	Code uint32
+	Code CodeType
 
 	// Data is any data returned from the app.
 	Data []byte
@@ -32,4 +32,9 @@ type Result struct {
 
 	// Tags are used for transaction indexing and pubsub.
 	Tags []cmn.KVPair
+}
+
+// TODO: In the future, more codes may be OK.
+func (res Result) IsOK() bool {
+	return res.Code.IsOK()
 }

@@ -3,26 +3,26 @@ package app
 import (
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/cosmos/cosmos-sdk/x/auth"
 )
 
-// initCapKeys, initBaseApp, initStores, initRoutes.
+// initCapKeys, initBaseApp, initStores, initHandlers.
 func (app *BasecoinApp) initBaseApp() {
-	app.BaseApp = baseapp.NewBaseApp(appName)
+	bapp := baseapp.NewBaseApp(appName)
+	app.BaseApp = bapp
+	app.router = bapp.Router()
 	app.initBaseAppTxDecoder()
-	app.initBaseAppAnteHandler()
 }
 
 func (app *BasecoinApp) initBaseAppTxDecoder() {
 	cdc := makeTxCodec()
-	app.BaseApp.SetTxDecoder(func(txBytes []byte) (sdk.Tx, error) {
+	app.BaseApp.SetTxDecoder(func(txBytes []byte) (sdk.Tx, sdk.Error) {
 		var tx = sdk.StdTx{}
+		// StdTx.Msg is an interface whose concrete
+		// types are registered in app/msgs.go.
 		err := cdc.UnmarshalBinary(txBytes, &tx)
-		return tx, err
+		if err != nil {
+			return nil, sdk.ErrTxParse("").TraceCause(err, "")
+		}
+		return tx, nil
 	})
-}
-
-func (app *BasecoinApp) initBaseAppAnteHandler() {
-	var authAnteHandler = auth.NewAnteHandler(app.accountMapper)
-	app.BaseApp.SetDefaultAnteHandler(authAnteHandler)
 }

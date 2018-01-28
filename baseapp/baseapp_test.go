@@ -17,34 +17,35 @@ import (
 )
 
 // A mock transaction to update a validator's voting power.
-type testTx struct {
+type testUpdatePowerTx struct {
 	Addr     []byte
 	NewPower int64
 }
 
-const txType = "testTx"
+const msgType = "testUpdatePowerTx"
 
-func (tx testTx) Type() string                            { return txType }
-func (tx testTx) Get(key interface{}) (value interface{}) { return nil }
-func (tx testTx) GetSignBytes() []byte                    { return nil }
-func (tx testTx) ValidateBasic() error                    { return nil }
-func (tx testTx) GetSigners() []crypto.Address            { return nil }
-func (tx testTx) GetFeePayer() crypto.Address             { return nil }
-func (tx testTx) GetSignatures() []sdk.StdSignature       { return nil }
+func (tx testUpdatePowerTx) Type() string                            { return msgType }
+func (tx testUpdatePowerTx) Get(key interface{}) (value interface{}) { return nil }
+func (tx testUpdatePowerTx) GetMsg() sdk.Msg                         { return tx }
+func (tx testUpdatePowerTx) GetSignBytes() []byte                    { return nil }
+func (tx testUpdatePowerTx) ValidateBasic() sdk.Error                { return nil }
+func (tx testUpdatePowerTx) GetSigners() []crypto.Address            { return nil }
+func (tx testUpdatePowerTx) GetFeePayer() crypto.Address             { return nil }
+func (tx testUpdatePowerTx) GetSignatures() []sdk.StdSignature       { return nil }
 
 func TestBasic(t *testing.T) {
 
 	// Create app.
 	app := NewBaseApp(t.Name())
-	storeKeys := createMounts(app.ms)
-	app.SetTxDecoder(func(txBytes []byte) (sdk.Tx, error) {
-		var ttx testTx
+	storeKeys := createMounts(app.cms)
+	app.SetTxDecoder(func(txBytes []byte) (sdk.Tx, sdk.Error) {
+		var ttx testUpdatePowerTx
 		fromJSON(txBytes, &ttx)
 		return ttx, nil
 	})
 
 	app.SetDefaultAnteHandler(func(ctx sdk.Context, tx sdk.Tx) (newCtx sdk.Context, res sdk.Result, abort bool) { return })
-	app.Router().AddRoute(txType, func(ctx sdk.Context, tx sdk.Tx) sdk.Result {
+	app.Router().AddRoute(msgType, func(ctx sdk.Context, msg sdk.Msg) sdk.Result {
 		// TODO
 		return sdk.Result{}
 	})
@@ -71,13 +72,13 @@ func TestBasic(t *testing.T) {
 
 	// Add 1 to each validator's voting power.
 	for i, val := range valSet {
-		tx := testTx{
+		tx := testUpdatePowerTx{
 			Addr:     makePubKey(secret(i)).Address(),
 			NewPower: val.Power + 1,
 		}
 		txBytes := toJSON(tx)
 		res := app.DeliverTx(txBytes)
-		assert.True(t, res.IsOK(), "%#v", res)
+		assert.True(t, res.IsOK(), "%#v\nABCI log: %s", res, res.Log)
 	}
 
 	// Simulate the end of a block.

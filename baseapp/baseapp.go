@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
@@ -29,7 +30,7 @@ type BaseApp struct {
 	db dbm.DB
 
 	// Main (uncached) state
-	ms sdk.CommitMultiStore
+	cms sdk.CommitMultiStore
 
 	// Unmarshal []byte into sdk.Tx
 	txDecoder sdk.TxDecoder
@@ -43,14 +44,14 @@ type BaseApp struct {
 	//--------------------
 	// Volatile
 
-	// CheckTx state, a cache-wrap of `.ms`.
+	// CheckTx state, a cache-wrap of `.cms`.
 	msCheck sdk.CacheMultiStore
 
-	// DeliverTx state, a cache-wrap of `.ms`.
+	// DeliverTx state, a cache-wrap of `.cms`.
 	msDeliver sdk.CacheMultiStore
 
 	// Current block header
-	header abci.Header
+	header *abci.Header
 
 	// Cached validator changes from DeliverTx.
 	valUpdates []abci.Validator
@@ -63,7 +64,7 @@ func NewBaseApp(name string) *BaseApp {
 		logger: makeDefaultLogger(),
 		name:   name,
 		db:     nil,
-		ms:     nil,
+		cms:    nil,
 		router: NewRouter(),
 	}
 	baseapp.initDB()
@@ -83,8 +84,8 @@ func (app *BaseApp) initDB() {
 }
 
 func (app *BaseApp) initMultiStore() {
-	ms := store.NewCommitMultiStore(app.db)
-	app.ms = ms
+	cms := store.NewCommitMultiStore(app.db)
+	app.cms = cms
 }
 
 func (app *BaseApp) Name() string {
@@ -92,7 +93,7 @@ func (app *BaseApp) Name() string {
 }
 
 func (app *BaseApp) MountStore(key sdk.StoreKey, typ sdk.StoreType) {
-	app.ms.MountStoreWithDB(key, typ, app.db)
+	app.cms.MountStoreWithDB(key, typ, app.db)
 }
 
 func (app *BaseApp) SetTxDecoder(txDecoder sdk.TxDecoder) {
@@ -114,30 +115,30 @@ func (app *BaseApp) SetInitStater(...) {}
 */
 
 func (app *BaseApp) LoadLatestVersion(mainKey sdk.StoreKey) error {
-	app.ms.LoadLatestVersion()
+	app.cms.LoadLatestVersion()
 	return app.initFromStore(mainKey)
 }
 
 func (app *BaseApp) LoadVersion(version int64, mainKey sdk.StoreKey) error {
-	app.ms.LoadVersion(version)
+	app.cms.LoadVersion(version)
 	return app.initFromStore(mainKey)
 }
 
 // The last CommitID of the multistore.
 func (app *BaseApp) LastCommitID() sdk.CommitID {
-	return app.ms.LastCommitID()
+	return app.cms.LastCommitID()
 }
 
 // The last commited block height.
 func (app *BaseApp) LastBlockHeight() int64 {
-	return app.ms.LastCommitID().Version
+	return app.cms.LastCommitID().Version
 }
 
-// Initializes the remaining logic from app.ms.
+// Initializes the remaining logic from app.cms.
 func (app *BaseApp) initFromStore(mainKey sdk.StoreKey) error {
-	lastCommitID := app.ms.LastCommitID()
-	main := app.ms.GetKVStore(mainKey)
-	header := abci.Header{}
+	var lastCommitID = app.cms.LastCommitID()
+	var main = app.cms.GetKVStore(mainKey)
+	var header *abci.Header
 
 	// Main store should exist.
 	if main == nil {
@@ -151,7 +152,7 @@ func (app *BaseApp) initFromStore(mainKey sdk.StoreKey) error {
 			errStr := fmt.Sprintf("Version > 0 but missing key %s", mainHeaderKey)
 			return errors.New(errStr)
 		}
-		err := proto.Unmarshal(headerBytes, &header)
+		err := proto.Unmarshal(headerBytes, header)
 		if err != nil {
 			return errors.Wrap(err, "Failed to parse Header")
 		}
@@ -173,10 +174,10 @@ func (app *BaseApp) initFromStore(mainKey sdk.StoreKey) error {
 
 //----------------------------------------
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) Info(req abci.RequestInfo) abci.ResponseInfo {
 
-	lastCommitID := app.ms.LastCommitID()
+	lastCommitID := app.cms.LastCommitID()
 
 	return abci.ResponseInfo{
 		Data:             app.name,
@@ -185,39 +186,48 @@ func (app *BaseApp) Info(req abci.RequestInfo) abci.ResponseInfo {
 	}
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) SetOption(req abci.RequestSetOption) (res abci.ResponseSetOption) {
 	// TODO: Implement
 	return
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) InitChain(req abci.RequestInitChain) (res abci.ResponseInitChain) {
 	// TODO: Use req.Validators
 	return
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) Query(req abci.RequestQuery) (res abci.ResponseQuery) {
 	// TODO: See app/query.go
 	return
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) BeginBlock(req abci.RequestBeginBlock) (res abci.ResponseBeginBlock) {
-	app.header = req.Header
-	app.msDeliver = app.ms.CacheMultiStore()
-	app.msCheck = app.ms.CacheMultiStore()
+	// NOTE: For consistency we should unset these upon EndBlock.
+	app.header = &req.Header
+	app.msDeliver = app.cms.CacheMultiStore()
+	app.msCheck = app.cms.CacheMultiStore()
+	app.valUpdates = nil
 	return
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) CheckTx(txBytes []byte) (res abci.ResponseCheckTx) {
 
-	result := app.runTx(true, txBytes)
+	// Decode the Tx.
+	var result sdk.Result
+	var tx, err = app.txDecoder(txBytes)
+	if err != nil {
+		result = err.Result()
+	} else {
+		result = app.runTx(true, txBytes, tx)
+	}
 
 	return abci.ResponseCheckTx{
-		Code:      result.Code,
+		Code:      uint32(result.Code),
 		Data:      result.Data,
 		Log:       result.Log,
 		GasWanted: result.GasWanted,
@@ -230,13 +240,20 @@ func (app *BaseApp) CheckTx(txBytes []byte) (res abci.ResponseCheckTx) {
 
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) DeliverTx(txBytes []byte) (res abci.ResponseDeliverTx) {
 
-	result := app.runTx(false, txBytes)
+	// Decode the Tx.
+	var result sdk.Result
+	var tx, err = app.txDecoder(txBytes)
+	if err != nil {
+		result = err.Result()
+	} else {
+		result = app.runTx(false, txBytes, tx)
+	}
 
 	// After-handler hooks.
-	if result.Code == abci.CodeTypeOK {
+	if result.IsOK() {
 		app.valUpdates = append(app.valUpdates, result.ValidatorUpdates...)
 	} else {
 		// Even though the Code is not OK, there will be some side
@@ -246,7 +263,7 @@ func (app *BaseApp) DeliverTx(txBytes []byte) (res abci.ResponseDeliverTx) {
 
 	// Tell the blockchain engine (i.e. Tendermint).
 	return abci.ResponseDeliverTx{
-		Code:      result.Code,
+		Code:      uint32(result.Code),
 		Data:      result.Data,
 		Log:       result.Log,
 		GasWanted: result.GasWanted,
@@ -255,68 +272,76 @@ func (app *BaseApp) DeliverTx(txBytes []byte) (res abci.ResponseDeliverTx) {
 	}
 }
 
-func (app *BaseApp) runTx(isCheckTx bool, txBytes []byte) (result sdk.Result) {
+// txBytes may be nil in some cases, for example, when tx is
+// coming from TestApp.  Also, in the future we may support
+// "internal" transactions.
+func (app *BaseApp) runTx(isCheckTx bool, txBytes []byte, tx sdk.Tx) (result sdk.Result) {
 
 	// Handle any panics.
 	defer func() {
 		if r := recover(); r != nil {
-			result = sdk.Result{
-				Code: 1, // TODO
-				Log:  fmt.Sprintf("Recovered: %v\n", r),
-			}
+			log := fmt.Sprintf("Recovered: %v\nstack:\n%v", r, string(debug.Stack()))
+			result = sdk.ErrInternal(log).Result()
 		}
 	}()
 
-	var store sdk.MultiStore
-	if isCheckTx {
-		store = app.msCheck
-	} else {
-		store = app.msDeliver
+	// Get the Msg.
+	var msg = tx.GetMsg()
+	if msg == nil {
+		return sdk.ErrInternal("Tx.GetMsg() returned nil").Result()
 	}
 
-	// Initialize arguments to Handler.
-	var ctx = sdk.NewContext(
-		store,
-		app.header,
-		isCheckTx,
-		txBytes,
-	)
-
-	// Decode the Tx.
-	tx, err := app.txDecoder(txBytes)
+	// Validate the Msg.
+	err := msg.ValidateBasic()
 	if err != nil {
-		return sdk.Result{
-			Code: 1, //  TODO
-		}
+		return err.Result()
 	}
+
+	// Construct a Context.
+	var ctx = app.newContext(isCheckTx, txBytes)
 
 	// TODO: override default ante handler w/ custom ante handler.
 
 	// Run the ante handler.
-	ctx, result, abort := app.defaultAnteHandler(ctx, tx)
+	newCtx, result, abort := app.defaultAnteHandler(ctx, tx)
 	if isCheckTx || abort {
 		return result
 	}
+	if !newCtx.IsZero() {
+		ctx = newCtx
+	}
+
+	// CacheWrap app.msDeliver in case it fails.
+	msCache := app.getMultiStore(isCheckTx).CacheMultiStore()
+	ctx = ctx.WithMultiStore(msCache)
 
 	// Match and run route.
-	msgType := tx.Type()
+	msgType := msg.Type()
 	handler := app.router.Route(msgType)
-	result = handler(ctx, tx)
+	result = handler(ctx, msg)
+
+	// If result was successful, write to app.msDeliver or app.msCheck.
+	if result.IsOK() {
+		msCache.Write()
+	}
 
 	return result
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) EndBlock(req abci.RequestEndBlock) (res abci.ResponseEndBlock) {
 	res.ValidatorUpdates = app.valUpdates
 	app.valUpdates = nil
+	app.header = nil
+	app.msDeliver = nil
+	app.msCheck = nil
 	return
 }
 
-// Implements ABCI
+// Implements ABCI.
 func (app *BaseApp) Commit() (res abci.ResponseCommit) {
 	app.msDeliver.Write()
-	commitID := app.ms.Commit()
+	commitID := app.cms.Commit()
 	app.logger.Debug("Commit synced",
 		"commit", commitID,
 	)
@@ -327,6 +352,14 @@ func (app *BaseApp) Commit() (res abci.ResponseCommit) {
 
 //----------------------------------------
 // Misc.
+
+func (app *BaseApp) getMultiStore(isCheckTx bool) sdk.MultiStore {
+	if isCheckTx {
+		return app.msCheck
+	} else {
+		return app.msDeliver
+	}
+}
 
 // Return index of list with validator of same PubKey, or -1 if no match
 func pubKeyIndex(val *abci.Validator, list []*abci.Validator) int {

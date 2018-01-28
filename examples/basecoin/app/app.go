@@ -15,6 +15,7 @@ const appName = "BasecoinApp"
 
 type BasecoinApp struct {
 	*bam.BaseApp
+	router     bam.Router
 	cdc        *wire.Codec
 	multiStore sdk.CommitMultiStore
 
@@ -22,7 +23,7 @@ type BasecoinApp struct {
 	capKeyMainStore *sdk.KVStoreKey
 	capKeyIBCStore  *sdk.KVStoreKey
 
-	// Object mappers :
+	// Object mappers:
 	accountMapper sdk.AccountMapper
 }
 
@@ -31,10 +32,10 @@ func NewBasecoinApp() *BasecoinApp {
 
 	// Create and configure app.
 	var app = &BasecoinApp{}
-	app.initCapKeys() // ./init_capkeys.go
-	app.initBaseApp() // ./init_baseapp.go
-	app.initStores()  // ./init_stores.go
-	app.initRoutes()  // ./init_routes.go
+	app.initCapKeys()  // ./init_capkeys.go
+	app.initBaseApp()  // ./init_baseapp.go
+	app.initStores()   // ./init_stores.go
+	app.initHandlers() // ./init_handlers.go
 
 	// TODO: Load genesis
 	// TODO: InitChain with validators

@@ -2,26 +2,40 @@ package types
 
 import (
 	"fmt"
+	"github.com/tendermint/go-crypto"
+	"runtime"
 )
+
+type CodeType uint32
+
+func (code CodeType) IsOK() bool {
+	if code == CodeOK {
+		return true
+	} else {
+		return false
+	}
+}
 
 const (
 	// ABCI Response Codes
 	// Base SDK reserves 0 ~ 99.
-	CodeInternalError       uint32 = 1
-	CodeTxParseError               = 2
-	CodeBadNonce                   = 3
-	CodeUnauthorized               = 4
-	CodeInsufficientFunds          = 5
-	CodeUnknownRequest             = 6
-	CodeUnrecognizedAddress        = 7
+	CodeOK                  CodeType = 0
+	CodeInternal            CodeType = 1
+	CodeTxParse             CodeType = 2
+	CodeBadNonce            CodeType = 3
+	CodeUnauthorized        CodeType = 4
+	CodeInsufficientFunds   CodeType = 5
+	CodeUnknownRequest      CodeType = 6
+	CodeUnrecognizedAddress CodeType = 7
+	CodeInvalidSequence     CodeType = 8
 )
 
 // NOTE: Don't stringer this, we'll put better messages in later.
-func CodeToDefaultLog(code uint32) string {
+func CodeToDefaultMsg(code CodeType) string {
 	switch code {
-	case CodeInternalError:
+	case CodeInternal:
 		return "Internal error"
-	case CodeTxParseError:
+	case CodeTxParse:
 		return "Tx parse error"
 	case CodeBadNonce:
 		return "Bad nonce"
@@ -33,6 +47,8 @@ func CodeToDefaultLog(code uint32) string {
 		return "Unknown request"
 	case CodeUnrecognizedAddress:
 		return "Unrecognized address"
+	case CodeInvalidSequence:
+		return "Invalid sequence"
 	default:
 		return fmt.Sprintf("Unknown code %d", code)
 	}
@@ -42,32 +58,36 @@ func CodeToDefaultLog(code uint32) string {
 // All errors are created via constructors so as to enable us to hijack them
 // and inject stack traces if we really want to.
 
-func ErrInternal(log string) Error {
-	return newError(CodeInternalError, log)
+func ErrInternal(msg string) Error {
+	return newError(CodeInternal, msg)
 }
 
-func ErrTxParse(log string) Error {
-	return newError(CodeTxParseError, log)
+func ErrTxParse(msg string) Error {
+	return newError(CodeTxParse, msg)
 }
 
-func ErrBadNonce(log string) Error {
-	return newError(CodeBadNonce, log)
+func ErrBadNonce(msg string) Error {
+	return newError(CodeBadNonce, msg)
 }
 
-func ErrUnauthorized(log string) Error {
-	return newError(CodeUnauthorized, log)
+func ErrUnauthorized(msg string) Error {
+	return newError(CodeUnauthorized, msg)
 }
 
-func ErrInsufficientFunds(log string) Error {
-	return newError(CodeInsufficientFunds, log)
+func ErrInsufficientFunds(msg string) Error {
+	return newError(CodeInsufficientFunds, msg)
 }
 
-func ErrUnknownRequest(log string) Error {
-	return newError(CodeUnknownRequest, log)
+func ErrUnknownRequest(msg string) Error {
+	return newError(CodeUnknownRequest, msg)
 }
 
-func ErrUnrecognizedAddress(log string) Error {
-	return newError(CodeUnrecognizedAddress, log)
+func ErrUnrecognizedAddress(addr crypto.Address) Error {
+	return newError(CodeUnrecognizedAddress, addr.String())
+}
+
+func ErrInvalidSequence(msg string) Error {
+	return newError(CodeInvalidSequence, msg)
 }
 
 //----------------------------------------
@@ -75,7 +95,7 @@ func ErrUnrecognizedAddress(log string) Error {
 
 type Error interface {
 	Error() string
-	ABCICode() uint32
+	ABCICode() CodeType
 	ABCILog() string
 	Trace(msg string) Error
 	TraceCause(cause error, msg string) Error
@@ -83,8 +103,8 @@ type Error interface {
 	Result() Result
 }
 
-func NewError(code uint32, log string) Error {
-	return newError(code, log)
+func NewError(code CodeType, msg string) Error {
+	return newError(code, msg)
 }
 
 type traceItem struct {
@@ -93,61 +113,78 @@ type traceItem struct {
 	lineno   int
 }
 
-type sdkError struct {
-	code  uint32
-	log   string
-	cause error
-	trace []traceItem
+func (ti traceItem) String() string {
+	return fmt.Sprintf("%v:%v %v", ti.filename, ti.lineno, ti.msg)
 }
 
-func newError(code uint32, log string) *sdkError {
+type sdkError struct {
+	code   CodeType
+	msg    string
+	cause  error
+	traces []traceItem
+}
+
+func newError(code CodeType, msg string) *sdkError {
 	// TODO capture stacktrace if ENV is set.
-	if log == "" {
-		log = CodeToDefaultLog(code)
+	if msg == "" {
+		msg = CodeToDefaultMsg(code)
 	}
 	return &sdkError{
-		code:  code,
-		log:   log,
-		cause: nil,
-		trace: nil,
+		code:   code,
+		msg:    msg,
+		cause:  nil,
+		traces: nil,
 	}
 }
 
 // Implements ABCIError.
 func (err *sdkError) Error() string {
-	return fmt.Sprintf("Error{%d:%s,%v,%v}", err.code, err.log, err.cause, len(err.trace))
+	return fmt.Sprintf("Error{%d:%s,%v,%v}", err.code, err.msg, err.cause, len(err.traces))
 }
 
 // Implements ABCIError.
-func (err *sdkError) ABCICode() uint32 {
+func (err *sdkError) ABCICode() CodeType {
 	return err.code
 }
 
 // Implements ABCIError.
 func (err *sdkError) ABCILog() string {
-	return err.log
+	traceLog := ""
+	for _, ti := range err.traces {
+		traceLog += ti.String() + "\n"
+	}
+	return fmt.Sprintf("msg: %v\ntrace:\n%v",
+		err.msg,
+		traceLog,
+	)
 }
 
-// Add tracing information to log with msg.
+// Add tracing information with msg.
 func (err *sdkError) Trace(msg string) Error {
-	// Include file & line number & msg to log.
-	// Do not include the whole stack trace.
-	err.trace = append(err.trace, traceItem{
-		filename: "todo", // TODO
-		lineno:   -1,     // TODO
-		msg:      msg,
-	})
-	return err
+	return err.doTrace(msg, 2)
 }
 
-// Add tracing information to log with cause and msg.
+// Add tracing information with cause and msg.
 func (err *sdkError) TraceCause(cause error, msg string) Error {
 	err.cause = cause
-	// Include file & line number & cause & msg to log.
+	return err.doTrace(msg, 2)
+}
+
+func (err *sdkError) doTrace(msg string, n int) Error {
+	_, fn, line, ok := runtime.Caller(n)
+	if !ok {
+		if fn == "" {
+			fn = "<unknown>"
+		}
+		if line <= 0 {
+			line = -1
+		}
+	}
+	// Include file & line number & msg.
 	// Do not include the whole stack trace.
-	err.trace = append(err.trace, traceItem{
-		filename: "todo", // TODO
-		lineno:   -1,     // TODO
+	err.traces = append(err.traces, traceItem{
+		filename: fn,
+		lineno:   line,
 		msg:      msg,
 	})
 	return err
